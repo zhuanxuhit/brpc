@@ -97,9 +97,14 @@ void* Acceptor::CloseIdleConnections(void* arg) {
     while (bthread_usleep(CHECK_INTERVAL_US) == 0) {
         // TODO: this is not efficient for a lot of connections(>100K)
         am->ListConnections(&checking_fds);
+        LOG(NOTICE) << "what=checking_fds_size " << checking_fds.size();
         for (size_t i = 0; i < checking_fds.size(); ++i) {
             SocketUniquePtr s;
             if (Socket::Address(checking_fds[i], &s) == 0) {
+                LOG(NOTICE) << "release fd:" << checking_fds[i]
+                            << " socket_id:" << s->id()
+                            << " from " << s->local_side()
+                            << " to " << s->remote_side();
                 s->ReleaseReferenceIfIdle(am->_idle_timeout_sec);
             }
         }
@@ -287,6 +292,7 @@ void Acceptor::OnNewConnectionsUntilEAGAIN(Socket* acception) {
 
         SocketUniquePtr sock;
         if (Socket::AddressFailedAsWell(socket_id, &sock) >= 0) {
+            LOG(NOTICE) << "new accept socket: " << socket_id;
             bool is_running = true;
             {
                 BAIDU_SCOPED_LOCK(am->_map_mutex);

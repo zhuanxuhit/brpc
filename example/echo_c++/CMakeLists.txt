@@ -39,10 +39,12 @@ endif()
 include_directories(${BRPC_INCLUDE_PATH})
 
 find_path(GFLAGS_INCLUDE_PATH gflags/gflags.h)
+
 find_library(GFLAGS_LIBRARY NAMES gflags libgflags)
 if((NOT GFLAGS_INCLUDE_PATH) OR (NOT GFLAGS_LIBRARY))
     message(FATAL_ERROR "Fail to find gflags")
 endif()
+message(STATUS ${GFLAGS_INCLUDE_PATH} ":" ${GFLAGS_LIBRARY})
 include_directories(${GFLAGS_INCLUDE_PATH})
 
 execute_process(

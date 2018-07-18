@@ -17,6 +17,7 @@
 #include <gflags/gflags.h>
 #include <butil/logging.h>
 #include <brpc/server.h>
+//#include <brpc/socket.h>
 #include "echo.pb.h"
 
 DEFINE_bool(echo_attachment, true, "Echo attachment as well");
@@ -32,18 +33,18 @@ DEFINE_int32(logoff_ms, 2000, "Maximum duration of server's LOGOFF state "
 namespace example {
 class EchoServiceImpl : public EchoService {
 public:
-    EchoServiceImpl() {};
-    virtual ~EchoServiceImpl() {};
-    virtual void Echo(google::protobuf::RpcController* cntl_base,
+    EchoServiceImpl()= default;
+    ~EchoServiceImpl() override = default;
+    void Echo(google::protobuf::RpcController* cntl_base,
                       const EchoRequest* request,
                       EchoResponse* response,
-                      google::protobuf::Closure* done) {
+                      google::protobuf::Closure* done) override {
         // This object helps you to call done->Run() in RAII style. If you need
         // to process the request asynchronously, pass done_guard.release().
         brpc::ClosureGuard done_guard(done);
 
-        brpc::Controller* cntl =
-            static_cast<brpc::Controller*>(cntl_base);
+        auto * cntl =
+                dynamic_cast<brpc::Controller*>(cntl_base);
 
         // The purpose of following logs is to help you to understand
         // how clients interact with servers more intuitively. You should 
@@ -92,10 +93,12 @@ int main(int argc, char* argv[]) {
     // Start the server.
     brpc::ServerOptions options;
     options.idle_timeout_sec = FLAGS_idle_timeout_s;
+    LOG(INFO) << "idle_timeout_sec is " << options.idle_timeout_sec;
     if (server.Start(FLAGS_port, &options) != 0) {
         LOG(ERROR) << "Fail to start EchoServer";
         return -1;
     }
+
 
     // Wait until Ctrl-C is pressed, then Stop() and Join() the server.
     server.RunUntilAskedToQuit();

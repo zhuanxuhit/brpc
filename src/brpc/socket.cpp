@@ -867,6 +867,7 @@ int Socket::ReleaseReferenceIfIdle(int idle_seconds) {
         // sockets for streaming purposes (say RTMP) are probably referenced
         // by many places, ReleaseAdditionalReference() cannot notify other
         // places to release refs, SetFailed() is a must.
+        LOG(NOTICE) << "what=set failed";
         return SetFailed(EUNUSED, "No data transmission for %d seconds",
                          idle_seconds);
     }
