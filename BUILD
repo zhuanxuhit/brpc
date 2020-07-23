@@ -1,3 +1,18 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 licenses(["notice"])  # Apache v2
 
 exports_files(["LICENSE"])
@@ -7,6 +22,12 @@ load(":bazel/brpc.bzl", "brpc_proto_library")
 config_setting(
     name = "with_glog",
     define_values = {"with_glog": "true"},
+    visibility = ["//visibility:public"],
+)
+
+config_setting(
+    name = "with_mesalink",
+    define_values = {"with_mesalink": "true"},
     visibility = ["//visibility:public"],
 )
 
@@ -47,6 +68,9 @@ COPTS = [
     ":with_glog": ["-DBRPC_WITH_GLOG=1"],
     "//conditions:default": ["-DBRPC_WITH_GLOG=0"],
 }) + select({
+    ":with_mesalink": ["-DUSE_MESALINK"],
+    "//conditions:default": [""],
+}) + select({
     ":with_thrift": ["-DENABLE_THRIFT_FRAMED_PROTOCOL=1"],
     "//conditions:default": [""],
 })
@@ -54,7 +78,7 @@ COPTS = [
 LINKOPTS = [
     "-lpthread",
     "-ldl",
-    "-lz", 
+    "-lz",
     "-lssl",
     "-lcrypto",
 ] + select({
@@ -73,6 +97,11 @@ LINKOPTS = [
     "//conditions:default": [
       "-lrt",
     ],
+}) + select({
+    ":with_mesalink": [
+        "-lmesalink",
+    ],
+    "//conditions:default": [],
 }) + select({
     ":with_thrift": [
         "-lthriftnb",
@@ -111,7 +140,6 @@ BUTIL_SRCS = [
     "src/butil/third_party/icu/icu_utf.cc",
     "src/butil/third_party/superfasthash/superfasthash.c",
     "src/butil/third_party/modp_b64/modp_b64.cc",
-    "src/butil/third_party/nspr/prtime.cc",
     "src/butil/third_party/symbolize/demangle.cc",
     "src/butil/third_party/symbolize/symbolize.cc",
     "src/butil/third_party/snappy/snappy-sinksource.cc",
@@ -151,7 +179,6 @@ BUTIL_SRCS = [
     "src/butil/hash.cc",
     "src/butil/lazy_instance.cc",
     "src/butil/location.cc",
-    "src/butil/md5.cc",
     "src/butil/memory/aligned_memory.cc",
     "src/butil/memory/ref_counted.cc",
     "src/butil/memory/ref_counted_memory.cc",
@@ -216,6 +243,8 @@ BUTIL_SRCS = [
     "src/butil/crc32c.cc",
     "src/butil/containers/case_ignored_flat_map.cpp",
     "src/butil/iobuf.cpp",
+    "src/butil/binary_printer.cpp",
+    "src/butil/recordio.cc",
     "src/butil/popen.cpp",
 ] + select({
         ":darwin": [
@@ -235,7 +264,7 @@ objc_library(
         "src/butil/atomicops.h",
         "src/butil/atomicops_internals_atomicword_compat.h",
         "src/butil/atomicops_internals_mac.h",
-        "src/butil/base_export.h",        
+        "src/butil/base_export.h",
         "src/butil/basictypes.h",
         "src/butil/build_config.h",
         "src/butil/compat.h",
@@ -269,7 +298,7 @@ objc_library(
         "src/butil/strings/sys_string_conversions.h",
         "src/butil/synchronization/lock.h",
         "src/butil/time/time.h",
-        "src/butil/time.h",        
+        "src/butil/time.h",
         "src/butil/third_party/dynamic_annotations/dynamic_annotations.h",
         "src/butil/threading/platform_thread.h",
         "src/butil/threading/thread_restrictions.h",

@@ -12,10 +12,12 @@
 *.prof
 *.so
 *.dylib
+*.rej
 /output
 /test/output
 cmake-build-debug/
 build_dir/
+build/
 
 # Ignore hidden files
 .*
@@ -34,3 +36,4 @@ cmake_install.cmake
 install_manifest.txt
 compile_commands.json
 CTestTestfile.cmake
+/cmake-build-debug/

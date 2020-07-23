@@ -1,3 +1,20 @@
+#!/usr/bin/env sh
+
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 SYSTEM=$(uname -s)
 if [ "$SYSTEM" = "Darwin" ]; then
     if [ -z "$BASH" ] || [ "$BASH" = "/bin/sh" ] ; then
@@ -21,9 +38,10 @@ else
     LDD=ldd
 fi
 
-TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,nodebugsymbols -n 'config_brpc' -- "$@"`
+TEMP=`getopt -o v: --long headers:,libs:,cc:,cxx:,with-glog,with-thrift,with-mesalink,nodebugsymbols -n 'config_brpc' -- "$@"`
 WITH_GLOG=0
 WITH_THRIFT=0
+WITH_MESALINK=0
 DEBUGSYMBOLS=-g
 
 if [ $? != 0 ] ; then >&2 $ECHO "Terminating..."; exit 1 ; fi
@@ -46,6 +64,7 @@ while true; do
         --cxx ) CXX=$2; shift 2 ;;
         --with-glog ) WITH_GLOG=1; shift 1 ;;
         --with-thrift) WITH_THRIFT=1; shift 1 ;;
+        --with-mesalink) WITH_MESALINK=1; shift 1 ;;
         --nodebugsymbols ) DEBUGSYMBOLS=; shift 1 ;;
         -- ) shift; break ;;
         * ) break ;;
@@ -96,20 +115,21 @@ find_dir_of_lib_or_die() {
 }
 
 find_bin() {
-    TARGET_BIN=$(which "$1" 2>/dev/null)
+    TARGET_BIN=$(find -L ${LIBS_IN} -type f -name "$1" 2>/dev/null | head -n1)
     if [ ! -z "$TARGET_BIN" ]; then
         $ECHO $TARGET_BIN
     else
-        find ${LIBS_IN} -name "$1" 2>/dev/null | head -n1
+        which "$1" 2>/dev/null
     fi
 }
 find_bin_or_die() {
     TARGET_BIN=$(find_bin "$1")
-    if [ -z "$TARGET_BIN" ]; then
-        >&2 $ECHO "Fail to find $1 from --libs"
+    if [ ! -z "$TARGET_BIN" ]; then
+        $ECHO $TARGET_BIN
+    else
+        >&2 $ECHO "Fail to find $1"
         exit 1
     fi
-    $ECHO $TARGET_BIN
 }
 
 find_dir_of_header() {
@@ -133,12 +153,29 @@ find_dir_of_header_or_die() {
     $ECHO $dir
 }
 
-# Inconvenient to check these headers in baidu-internal
-#PTHREAD_HDR=$(find_dir_of_header_or_die pthread.h)
-OPENSSL_HDR=$(find_dir_of_header_or_die openssl/ssl.h)
+if [ "$SYSTEM" = "Darwin" ]; then
+    OPENSSL_LIB="/usr/local/opt/openssl/lib"
+    OPENSSL_HDR="/usr/local/opt/openssl/include"
+else
+    # User specified path of openssl, if not given it's empty
+    OPENSSL_LIB=$(find_dir_of_lib ssl)
+    # Inconvenient to check these headers in baidu-internal
+    #PTHREAD_HDR=$(find_dir_of_header_or_die pthread.h)
+    OPENSSL_HDR=$(find_dir_of_header_or_die openssl/ssl.h)
+fi
+
+if [ $WITH_MESALINK != 0 ]; then
+    MESALINK_HDR=$(find_dir_of_header_or_die mesalink/openssl/ssl.h)
+    OPENSSL_HDR="$OPENSSL_HDR\n$MESALINK_HDR"
+fi
 
 STATIC_LINKINGS=
 DYNAMIC_LINKINGS="-lpthread -lssl -lcrypto -ldl -lz"
+
+if [ $WITH_MESALINK != 0 ]; then
+    DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -lmesalink"
+fi
+
 if [ "$SYSTEM" = "Linux" ]; then
     DYNAMIC_LINKINGS="$DYNAMIC_LINKINGS -lrt"
 fi
@@ -220,7 +257,7 @@ PROTOBUF_HDR=$(find_dir_of_header_or_die google/protobuf/message.h)
 LEVELDB_HDR=$(find_dir_of_header_or_die leveldb/db.h)
 
 HDRS=$($ECHO "$GFLAGS_HDR\n$PROTOBUF_HDR\n$LEVELDB_HDR\n$OPENSSL_HDR" | sort | uniq)
-LIBS=$($ECHO "$GFLAGS_LIB\n$PROTOBUF_LIB\n$LEVELDB_LIB\n$SNAPPY_LIB" | sort | uniq)
+LIBS=$($ECHO "$GFLAGS_LIB\n$PROTOBUF_LIB\n$LEVELDB_LIB\n$OPENSSL_LIB\n$SNAPPY_LIB" | sort | uniq)
 
 absent_in_the_list() {
     TMP=`$ECHO "$1\n$2" | sort | uniq`
@@ -282,7 +319,7 @@ if [ ! -z "$DEBUGSYMBOLS" ]; then
     CPPFLAGS="${CPPFLAGS} $DEBUGSYMBOLS"
 fi
 if [ "$SYSTEM" = "Darwin" ]; then
-    CPPFLAGS="${CPPFLAGS} -Wno-deprecated-declarations"
+    CPPFLAGS="${CPPFLAGS} -Wno-deprecated-declarations -Wno-inconsistent-missing-override"
     version=`sw_vers -productVersion | awk -F '.' '{print $1 "." $2}'`
     if [[ `echo "$version<10.12" | bc -l` == 1 ]]; then
         CPPFLAGS="${CPPFLAGS} -DNO_CLOCK_GETTIME_IN_MAC"
@@ -302,6 +339,10 @@ if [ $WITH_THRIFT != 0 ]; then
     else
         append_to_output "STATIC_LINKINGS+=-lthriftnb"
     fi
+fi
+
+if [ $WITH_MESALINK != 0 ]; then
+    CPPFLAGS="${CPPFLAGS} -DUSE_MESALINK"
 fi
 
 append_to_output "CPPFLAGS=${CPPFLAGS}"

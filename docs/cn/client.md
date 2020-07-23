@@ -121,6 +121,10 @@ BNS是百度内常用的命名服务，比如bns://rdev.matrix.all，其中"bns"
 
 缺点: 受限于DNS的格式限制无法传递复杂的meta数据，也无法实现通知机制。
 
+### https://\<url\>
+
+和http前缀类似，只是会自动开启SSL。
+
 ### consul://\<service-name\>
 
 通过consul获取服务名称为service-name的服务列表。consul的默认地址是localhost:8500，可通过gflags设置-consul\_agent\_addr来修改。consul的连接超时时间默认是200ms，可通过-consul\_connect\_timeout\_ms来修改。
@@ -137,16 +141,18 @@ BNS是百度内常用的命名服务，比如bns://rdev.matrix.all，其中"bns"
 用户可以通过实现brpc::NamingService来对接更多命名服务，具体见[这里](https://github.com/brpc/brpc/blob/master/docs/cn/load_balancing.md#%E5%91%BD%E5%90%8D%E6%9C%8D%E5%8A%A1)
 
 ### 命名服务中的tag
-tag的用途主要是实现“粗粒度的wrr”，当给同一个地址加上不同的tag后，它们会被认为是不同的实例，从而让那个地址被负载均衡器正比与不同tag个数的流量。不过，你应当优先考虑使用[wrr算法](#wrr)，相比使用tag可以实现更加精细的按权重分流。
+每个地址可以附带一个tag，在常见的命名服务中，如果地址后有空格，则空格之后的内容均为tag。
+相同的地址配合不同的tag被认为是不同的实例，brpc会建立不同的连接。用户可利用这个特性更灵活地控制与单个地址的连接方式。
+如果你需要"带权重的轮询"，你应当优先考虑使用[wrr算法](#wrr)，而不是用tag来模拟。
 
 ### VIP相关的问题
 VIP一般是4层负载均衡器的公网ip，背后有多个RS。当客户端连接至VIP时，VIP会选择一个RS建立连接，当客户端连接断开时，VIP也会断开与对应RS的连接。
 
-如果客户端只与VIP建立一个连接(brpc中的单连接)，那么来自这个客户端的所有流量都会落到一台RS上。如果客户端的数量非常多，至少在集群的角度，所有的RS还是会分到足够多的连接，从而基本均衡。但如果客户端的数量不多，或客户端的负载差异很大，那么可能在个别RS上出现热点。另一个问题是当有多个vip可选时，客户端分给它们的流量与各自后面的RS数量可能不一致。
+如果客户端只与VIP建立一个连接(brpc中的单连接)，那么来自这个客户端的所有流量都会落到一台RS上。如果客户端的数量非常多，至少在集群的角度，所有的RS还是会分到足够多的连接，从而基本均衡。但如果客户端的数量不多，或客户端的负载差异很大，那么可能在个别RS上出现热点。另一个问题是当有多个VIP可选时，客户端分给它们的流量与各自后面的RS数量可能不一致。
 
-解决这个问题的一种方法是使用连接池模式(pooled)，这样客户端对一个vip就可能建立多个连接(约为一段时间内的最大并发度)，从而让负载落到多个RS上。如果有多个vip，可以用[wrr负载均衡](#wrr)给不同的vip声明不同的权重从而分到对应比例的流量，或给相同的vip后加上多个不同的tag而被认为是多个不同的实例。
+解决这个问题的一种方法是使用连接池模式(pooled)，这样客户端对一个VIP就可能建立多个连接(约为一段时间内的最大并发度)，从而让负载落到多个RS上。如果有多个VIP，可以用[wrr负载均衡](#wrr)给不同的VIP声明不同的权重从而分到对应比例的流量，或给相同的VIP后加上多个不同的tag而被认为是多个不同的实例。
 
-注意：在客户端使用单连接时，给相同的vip加上不同的tag确实能让这个vip分到更多的流量，但连接仍然只会有一个，这是由目前brpc实现决定的。
+如果对性能有更高的要求，或要限制大集群中连接的数量，可以使用单连接并给相同的VIP加上不同的tag以建立多个连接。相比连接池一般连接数量更小，系统调用开销更低，但如果tag不够多，仍可能出现RS热点。
 
 ### 命名服务过滤器
 
@@ -228,6 +234,15 @@ locality-aware，优先选择延时低的下游，直到其延时高于其他机
 
 实现原理请查看[Consistent Hashing](consistent_hashing.md)。
 
+### 从集群宕机后恢复时的客户端限流
+
+集群宕机指的是集群中所有server都处于不可用的状态。由于健康检查机制，当集群恢复正常后，server会间隔性地上线。当某一个server上线后，所有的流量会发送过去，可能导致服务再次过载。若熔断开启，则可能导致其它server上线前该server再次熔断，集群永远无法恢复。作为解决方案，brpc提供了在集群宕机后恢复时的限流机制：当集群中没有可用server时，集群进入恢复状态，假设正好能服务所有请求的server数量为min_working_instances，当前集群可用的server数量为q，则在恢复状态时，client接受请求的概率为q/min_working_instances，否则丢弃；若一段时间hold_seconds内q保持不变，则把流量重新发送全部可用的server上，并离开恢复状态。在恢复阶段时，可以通过判断controller.ErrorCode()是否等于brpc::ERJECT来判断该次请求是否被拒绝，被拒绝的请求不会被框架重试。
+
+此恢复机制要求下游server的能力是类似的，所以目前只针对rr和random有效，开启方式是在*load_balancer_name*后面加上min_working_instances和hold_seconds参数的值，例如：
+```c++
+channel.Init("http://...", "random:min_working_instances=6 hold_seconds=10", &options);
+```
+
 ## 健康检查
 
 连接断开的server会被暂时隔离而不会被负载均衡算法选中，brpc会定期连接被隔离的server，以检查他们是否恢复正常，间隔由参数-health_check_interval控制:
@@ -236,7 +251,7 @@ locality-aware，优先选择延时低的下游，直到其延时高于其他机
 | ------------------------- | ----- | ---------------------------------------- | ----------------------- |
 | health_check_interval （R） | 3     | seconds between consecutive health-checkings | src/brpc/socket_map.cpp |
 
-一旦server被连接上，它会恢复为可用状态。如果在隔离过程中，server从命名服务中删除了，brpc也会停止连接尝试。
+在默认的配置下，一旦server被连接上，它会恢复为可用状态；brpc还提供了应用层健康检查的机制，框架会发送一个HTTP GET请求到该server，请求路径通过-health\_check\_path设置（默认为空），只有当server返回200时，它才会恢复。在两种健康检查机制下，都可通过-health\_check\_timeout\_ms设置超时（默认500ms）。如果在隔离过程中，server从命名服务中删除了，brpc也会停止连接尝试。
 
 # 发起访问
 
@@ -249,7 +264,7 @@ stub.some_method(controller, request, response, done);
 ```c++
 XXX_Stub(&channel).some_method(controller, request, response, done);
 ```
-一个例外是http client。访问http服务和protobuf没什么关系，直接调用CallMethod即可，除了Controller和done均为NULL，详见[访问HTTP服务](http_client.md)。
+一个例外是http/h2 client。访问http服务和protobuf没什么关系，直接调用CallMethod即可，除了Controller和done均为NULL，详见[访问http/h2服务](http_client.md)。
 
 ## 同步访问
 
@@ -492,7 +507,7 @@ Controller的特点：
 
 **ChannelOptions.timeout_ms**是对应Channel上所有RPC的总超时，Controller.set_timeout_ms()可修改某次RPC的值。单位毫秒，默认值1秒，最大值2^31（约24天），-1表示一直等到回复或错误。
 
-**ChannelOptions.connect_timeout_ms**是对应Channel上所有RPC的连接超时，单位毫秒，默认值1秒。-1表示等到连接建立或出错，此值被限制为不能超过timeout_ms。注意此超时独立于TCP的连接超时，一般来说前者小于后者，反之则可能在connect_timeout_ms未达到前由于TCP连接超时而出错。
+**ChannelOptions.connect_timeout_ms**是对应Channel上所有RPC的连接超时(单位毫秒)。-1表示等到连接建立或出错，此值被限制为不能超过timeout_ms。注意此超时独立于TCP的连接超时，一般来说前者小于后者，反之则可能在connect_timeout_ms未达到前由于TCP连接超时而出错。
 
 注意1：brpc中的超时是deadline，超过就意味着RPC结束，超时后没有重试。其他实现可能既有单次访问的超时，也有代表deadline的超时。迁移到brpc时请仔细区分。
 
@@ -509,6 +524,12 @@ r34717后Controller.has_backup_request()获知是否发送过backup_request。
 **重试时框架会尽量避开之前尝试过的server。**
 
 重试的触发条件有(条件之间是AND关系）：
+
+* 连接出错
+* 没到超时
+* 有剩余重试次数
+* 错误值得重试
+
 ### 连接出错
 
 如果server一直没有返回，但连接没有问题，这种情况下不会重试。如果你需要在一定时间后发送另一个请求，使用backup request。
@@ -529,7 +550,7 @@ Controller.set_max_retry(0)或ChannelOptions.max_retry=0关闭重试。
 
 一些错误重试是没有意义的，就不会重试，比如请求有错时(EREQUEST)不会重试，因为server总不会接受,没有意义。
 
-用户可以通过继承[brpc::RetryPolicy](https://github.com/brpc/brpc/blob/master/src/brpc/retry_policy.h)自定义重试条件。比如brpc默认不重试HTTP相关的错误，而你的程序中希望在碰到HTTP_STATUS_FORBIDDEN (403)时重试，可以这么做：
+用户可以通过继承[brpc::RetryPolicy](https://github.com/brpc/brpc/blob/master/src/brpc/retry_policy.h)自定义重试条件。比如brpc默认不重试http/h2相关的错误，而你的程序中希望在碰到HTTP_STATUS_FORBIDDEN (403)时重试，可以这么做：
 
 ```c++
 #include <brpc/retry_policy.h>
@@ -537,7 +558,7 @@ Controller.set_max_retry(0)或ChannelOptions.max_retry=0关闭重试。
 class MyRetryPolicy : public brpc::RetryPolicy {
 public:
     bool DoRetry(const brpc::Controller* cntl) const {
-        if (cntl->ErrorCode() == brpc::EHTTP && // HTTP错误
+        if (cntl->ErrorCode() == brpc::EHTTP && // http/h2错误
             cntl->http_response().status_code() == brpc::HTTP_STATUS_FORBIDDEN) {
             return true;
         }
@@ -564,6 +585,10 @@ options.retry_policy = &g_my_retry_policy;
 
 由于成本的限制，大部分线上server的冗余度是有限的，主要是满足多机房互备的需求。而激进的重试逻辑很容易导致众多client对server集群造成2-3倍的压力，最终使集群雪崩：由于server来不及处理导致队列越积越长，使所有的请求得经过很长的排队才被处理而最终超时，相当于服务停摆。默认的重试是比较安全的: 只要连接不断RPC就不会重试，一般不会产生大量的重试请求。用户可以通过RetryPolicy定制重试策略，但也可能使重试变成一场“风暴”。当你定制RetryPolicy时，你需要仔细考虑client和server的协作关系，并设计对应的异常测试，以确保行为符合预期。
 
+## 熔断
+
+具体方法见[这里](circuit_breaker.md)。
+
 ## 协议
 
 Channel的默认协议是baidu_std，可通过设置ChannelOptions.protocol换为其他协议，这个字段既接受enum也接受字符串。
@@ -571,26 +596,32 @@ Channel的默认协议是baidu_std，可通过设置ChannelOptions.protocol换�
 目前支持的有：
 
 - PROTOCOL_BAIDU_STD 或 “baidu_std"，即[百度标准协议](baidu_std.md)，默认为单连接。
+- PROTOCOL_HTTP 或 ”http", http/1.0或http/1.1协议，默认为连接池(Keep-Alive)。
+  - 访问普通http服务的方法见[访问http/h2服务](http_client.md)
+  - 通过http:json或http:proto访问pb服务的方法见[http/h2衍生协议](http_derivatives.md)
+- PROTOCOL_H2 或 ”h2", http/2协议，默认是单连接。
+  - 访问普通h2服务的方法见[访问http/h2服务](http_client.md)。
+  - 通过h2:json或h2:proto访问pb服务的方法见[http/h2衍生协议](http_derivatives.md)
+- "h2:grpc", [gRPC](https://grpc.io)的协议，也是h2的衍生协议，默认为单连接，具体见[h2:grpc](http_derivatives.md#h2grpc)。
+- PROTOCOL_THRIFT 或 "thrift"，[apache thrift](https://thrift.apache.org)的协议，默认为连接池, 具体方法见[访问thrift](thrift.md)。
+- PROTOCOL_MEMCACHE 或 "memcache"，memcached的二进制协议，默认为单连接。具体方法见[访问memcached](memcache_client.md)。
+- PROTOCOL_REDIS 或 "redis"，redis 1.2后的协议(也是hiredis支持的协议)，默认为单连接。具体方法见[访问Redis](redis_client.md)。
 - PROTOCOL_HULU_PBRPC 或 "hulu_pbrpc"，hulu的协议，默认为单连接。
 - PROTOCOL_NOVA_PBRPC 或 ”nova_pbrpc“，网盟的协议，默认为连接池。
-- PROTOCOL_HTTP 或 ”http", http 1.0或1.1协议，默认为连接池(Keep-Alive)。具体方法见[访问HTTP服务](http_client.md)。
 - PROTOCOL_SOFA_PBRPC 或 "sofa_pbrpc"，sofa-pbrpc的协议，默认为单连接。
 - PROTOCOL_PUBLIC_PBRPC 或 "public_pbrpc"，public_pbrpc的协议，默认为连接池。
 - PROTOCOL_UBRPC_COMPACK 或 "ubrpc_compack"，public/ubrpc的协议，使用compack打包，默认为连接池。具体方法见[ubrpc (by protobuf)](ub_client.md)。相关的还有PROTOCOL_UBRPC_MCPACK2或ubrpc_mcpack2，使用mcpack2打包。
 - PROTOCOL_NSHEAD_CLIENT 或 "nshead_client"，这是发送baidu-rpc-ub中所有UBXXXRequest需要的协议，默认为连接池。具体方法见[访问UB](ub_client.md)。
 - PROTOCOL_NSHEAD 或 "nshead"，这是发送NsheadMessage需要的协议，默认为连接池。具体方法见[nshead+blob](ub_client.md#nshead-blob) 。
-- PROTOCOL_MEMCACHE 或 "memcache"，memcached的二进制协议，默认为单连接。具体方法见[访问memcached](memcache_client.md)。
-- PROTOCOL_REDIS 或 "redis"，redis 1.2后的协议（也是hiredis支持的协议），默认为单连接。具体方法见[访问Redis](redis_client.md)。
 - PROTOCOL_NSHEAD_MCPACK 或 "nshead_mcpack", 顾名思义，格式为nshead + mcpack，使用mcpack2pb适配，默认为连接池。
 - PROTOCOL_ESP 或 "esp"，访问使用esp协议的服务，默认为连接池。
-- PROTOCOL_THRIFT 或 "thrift"，访问使用thrift协议的服务，默认为连接池, 具体方法见[访问thrift](thrift.md)。
 
 ## 连接方式
 
 brpc支持以下连接方式：
 
-- 短连接：每次RPC前建立连接，结束后关闭连接。由于每次调用得有建立连接的开销，这种方式一般用于偶尔发起的操作，而不是持续发起请求的场景。没有协议默认使用这种连接方式，http 1.0对连接的处理效果类似短链接。
-- 连接池：每次RPC前取用空闲连接，结束后归还，一个连接上最多只有一个请求，一个client对一台server可能有多条连接。http 1.1和各类使用nshead的协议都是这个方式。
+- 短连接：每次RPC前建立连接，结束后关闭连接。由于每次调用得有建立连接的开销，这种方式一般用于偶尔发起的操作，而不是持续发起请求的场景。没有协议默认使用这种连接方式，http/1.0对连接的处理效果类似短链接。
+- 连接池：每次RPC前取用空闲连接，结束后归还，一个连接上最多只有一个请求，一个client对一台server可能有多条连接。http/1.1和各类使用nshead的协议都是这个方式。
 - 单连接：进程内所有client与一台server最多只有一个连接，一个连接上可能同时有多个请求，回复返回顺序和请求顺序不需要一致，这是baidu_std，hulu_pbrpc，sofa_pbrpc协议的默认选项。
 
 |                     | 短连接                                      | 连接池                   | 单连接                 |
@@ -605,11 +636,11 @@ brpc支持以下连接方式：
 
 - CONNECTION_TYPE_SINGLE 或 "single" 为单连接
 
-- CONNECTION_TYPE_POOLED 或 "pooled" 为连接池, 与单个远端的最大连接数由-max_connection_pool_size控制:
+- CONNECTION_TYPE_POOLED 或 "pooled" 为连接池, 单个远端对应的连接池最多能容纳的连接数由-max_connection_pool_size控制。注意,此选项不等价于“最大连接数”。需要连接时只要没有闲置的，就会新建；归还时，若池中已有max_connection_pool_size个连接的话，会直接关闭。max_connection_pool_size的取值要符合并发，否则超出的部分会被频繁建立和关闭，效果类似短连接。若max_connection_pool_size为0，就近似于完全的短连接。
 
   | Name                         | Value | Description                              | Defined At          |
   | ---------------------------- | ----- | ---------------------------------------- | ------------------- |
-  | max_connection_pool_size (R) | 100   | maximum pooled connection count to a single endpoint | src/brpc/socket.cpp |
+  | max_connection_pool_size (R) | 100   | Max number of pooled connections to a single endpoint | src/brpc/socket.cpp |
 
 - CONNECTION_TYPE_SHORT 或 "short" 为短连接
 
@@ -659,52 +690,31 @@ brpc支持[Streaming RPC](streaming_rpc.md)，这是一种应用层的连接，�
 
 baidu_std和hulu_pbrpc协议支持附件，这段数据由用户自定义，不经过protobuf的序列化。站在client的角度，设置在Controller::request_attachment()的附件会被server端收到，response_attachment()则包含了server端送回的附件。附件不受压缩选项影响。
 
-在http协议中，附件对应[message body](http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html)，比如要POST的数据就设置在request_attachment()中。
+在http/h2协议中，附件对应[message body](http://www.w3.org/Protocols/rfc2616/rfc2616-sec4.html)，比如要POST的数据就设置在request_attachment()中。
 
 ## 开启SSL
 
-要开启SSL，首先确保代码依赖了最新的openssl库。如果openssl版本很旧，会有严重的安全漏洞，支持的加密算法也少，违背了开启SSL的初衷。然后设置`ChannelOptions.ssl_options`，具体见[ssl_option.h](https://github.com/brpc/brpc/blob/master/src/brpc/ssl_option.h)。
+要开启SSL，首先确保代码依赖了最新的openssl库。如果openssl版本很旧，会有严重的安全漏洞，支持的加密算法也少，违背了开启SSL的初衷。
+然后设置`ChannelOptions.mutable_ssl_options()`，具体选项见[ssl_options.h](https://github.com/brpc/brpc/blob/master/src/brpc/ssl_options.h)。ChannelOptions.has_ssl_options()可查询是否设置过ssl_options, ChannelOptions.ssl_options()可访问到设置过的只读ssl_options。
 
 ```c++
-// SSL options at client side
-struct ChannelSSLOptions {
-    // Whether to enable SSL on the channel.
-    // Default: false
-    bool enable;
-    
-    // Cipher suites used for SSL handshake.
-    // The format of this string should follow that in `man 1 cipers'.
-    // Default: "DEFAULT"
-    std::string ciphers;
-    
-    // SSL protocols used for SSL handshake, separated by comma.
-    // Available protocols: SSLv3, TLSv1, TLSv1.1, TLSv1.2
-    // Default: TLSv1, TLSv1.1, TLSv1.2
-    std::string protocols;
-    
-    // When set, fill this into the SNI extension field during handshake,
-    // which can be used by the server to locate the right certificate. 
-    // Default: empty
-    std::string sni_name;
-    
-    // Options used to verify the server's certificate
-    // Default: see above
-    VerifyOptions verify;
-    
-    // ... Other options
-};
-```
+// 开启客户端SSL并使用默认值。
+options.mutable_ssl_options();
 
-- 目前只有连接单点的Channel可以开启SSL访问，使用了命名服务的Channel**不支持开启SSL**。
+// 开启客户端SSL并定制选项。
+options.mutable_ssl_options()->ciphers_name = "...";
+options.mutable_ssl_options()->sni_name = "...";
+```
+- 连接单点和集群的Channel均可以开启SSL访问（初始实现曾不支持集群）。
 - 开启后，该Channel上任何协议的请求，都会被SSL加密后发送。如果希望某些请求不加密，需要额外再创建一个Channel。
-- 针对HTTPS做了些易用性优化：`Channel.Init`时能自动识别https://前缀，自动开启SSL；-http_verbose时也会输出证书信息。
+- 针对HTTPS做了些易用性优化：Channel.Init能自动识别https://前缀并自动开启SSL；开启-http_verbose也会输出证书信息。
 
 ## 认证
 
 client端的认证一般分为2种：
 
 1. 基于请求的认证：每次请求都会带上认证信息。这种方式比较灵活，认证信息中可以含有本次请求中的字段，但是缺点是每次请求都会需要认证，性能上有所损失
-2. 基于连接的认证：当TCP连接建立后，client发送认证包，认证成功后，后续该连接上的请求不再需要认证。相比前者，这种方式灵活度不高（一般ren认证包里只能携带本机一些静态信息），但性能较好，一般用于单连接/连接池场景
+2. 基于连接的认证：当TCP连接建立后，client发送认证包，认证成功后，后续该连接上的请求不再需要认证。相比前者，这种方式灵活度不高（一般认证包里只能携带本机一些静态信息），但性能较好，一般用于单连接/连接池场景
 
 针对第一种认证场景，在实现上非常简单，将认证的格式定义加到请求结构体中，每次当做正常RPC发送出去即可；针对第二种场景，brpc提供了一种机制，只要用户继承实现：
 
@@ -737,7 +747,7 @@ set_request_compress_type()设置request的压缩方式，默认不压缩。
 
 注意：附件不会被压缩。
 
-HTTP body的压缩方法见[client压缩request body](http_client#压缩request-body)。
+http/h2 body的压缩方法见[client压缩request body](http_client#压缩request-body)。
 
 支持的压缩方法有：
 

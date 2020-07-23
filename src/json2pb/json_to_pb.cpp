@@ -1,4 +1,19 @@
-// Copyright (c) 2014 Baidu, Inc.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
 #include <vector>
 #include <map>
@@ -402,13 +417,13 @@ bool JsonValueToProtoMessage(const BUTIL_RAPIDJSON_NAMESPACE::Value& json_value,
                              google::protobuf::Message* message,
                              const Json2PbOptions& options,
                              std::string* err) {
+    const google::protobuf::Descriptor* descriptor = message->GetDescriptor();
     if (!json_value.IsObject()) {
-        J2PERROR(err, "`json_value' is not a json object");
+        J2PERROR(err, "`json_value' is not a json object. %s", descriptor->name().c_str());
         return false;
     }
 
     const google::protobuf::Reflection* reflection = message->GetReflection();
-    const google::protobuf::Descriptor* descriptor = message->GetDescriptor();
     
     std::vector<const google::protobuf::FieldDescriptor*> fields;
     fields.reserve(64);
@@ -491,6 +506,10 @@ inline bool JsonToProtoMessageInline(const std::string& json_string,
     }
     BUTIL_RAPIDJSON_NAMESPACE::Document d;
     d.Parse<0>(json_string.c_str());
+    if (d.HasParseError()) {
+        J2PERROR(error, "Invalid json format");
+        return false;
+    }
     return json2pb::JsonValueToProtoMessage(d, message, options, error);
 }
 

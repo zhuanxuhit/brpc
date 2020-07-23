@@ -1,19 +1,20 @@
-// Copyright (c) 2016 Baidu, Inc.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// 
-//     http://www.apache.org/licenses/LICENSE-2.0
-// 
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-// Authors: Ge,Jun (gejun@baidu.com)
-//          Jiashun Zhu (zhujiashun@baidu.com)
 
 #include <gflags/gflags.h>
 #include <google/protobuf/io/zero_copy_stream_impl_lite.h> // StringOutputStream
@@ -390,14 +391,14 @@ std::ostream& operator<<(std::ostream& os, const RtmpAudioMessage& msg) {
               << " rate=" << FlvSoundRate2Str(msg.rate)
               << " bits=" << FlvSoundBits2Str(msg.bits)
               << " type=" << FlvSoundType2Str(msg.type)
-              << " data=" << butil::PrintedAsBinary(msg.data) << '}';
+              << " data=" << butil::ToPrintable(msg.data) << '}';
 }
 
 std::ostream& operator<<(std::ostream& os, const RtmpVideoMessage& msg) {
     return os << "VideoMessage{timestamp=" << msg.timestamp
               << " type=" << FlvVideoFrameType2Str(msg.frame_type)
               << " codec=" << FlvVideoCodec2Str(msg.codec)
-              << " data=" << butil::PrintedAsBinary(msg.data) << '}';
+              << " data=" << butil::ToPrintable(msg.data) << '}';
 }
 
 butil::Status RtmpAACMessage::Create(const RtmpAudioMessage& msg) {
@@ -1019,8 +1020,8 @@ private:
 class RtmpConnect : public AppConnect {
 public:
     // @AppConnect
-    void StartConnect(const Socket* s, void (*done)(int, void*), void* data);
-    void StopConnect(Socket* s);
+    void StartConnect(const Socket* s, void (*done)(int, void*), void* data) override;
+    void StopConnect(Socket* s) override;
 };
 
 void RtmpConnect::StartConnect(
@@ -1067,7 +1068,6 @@ void RtmpConnect::StopConnect(Socket* s) {
     } else {
         ctx->OnConnected(EFAILEDSOCKET);
     }
-    delete this;
 }
 
 class RtmpSocketCreator : public SocketCreator {
@@ -1078,7 +1078,7 @@ public:
 
     int CreateSocket(const SocketOptions& opt, SocketId* id) {
         SocketOptions sock_opt = opt;
-        sock_opt.app_connect = new RtmpConnect;
+        sock_opt.app_connect = std::make_shared<RtmpConnect>();
         sock_opt.initial_parsing_context = new policy::RtmpContext(&_connect_options, NULL);
         return get_client_side_messenger()->Create(sock_opt, id);
     }
@@ -1090,7 +1090,7 @@ private:
 int RtmpClientImpl::CreateSocket(const butil::EndPoint& pt, SocketId* id) {
     SocketOptions sock_opt;
     sock_opt.remote_side = pt;
-    sock_opt.app_connect = new RtmpConnect;
+    sock_opt.app_connect = std::make_shared<RtmpConnect>();
     sock_opt.initial_parsing_context = new policy::RtmpContext(&_connect_options, NULL);
     return get_client_side_messenger()->Create(sock_opt, id);
 }
@@ -1679,38 +1679,26 @@ void RtmpClientStream::SignalError() {
     }
 }
 
-void RtmpClientStream::CleanupSocketForStream(
-    Socket* prev_sock, Controller*, int /*error_code*/) {
-    if (prev_sock) {
-        if (_from_socketmap) {
-            _client_impl->socket_map().Remove(prev_sock->remote_side(),
-                                              prev_sock->id());
-        } else {
-            prev_sock->SetFailed(); // not necessary, already failed.
-        }
-    }
-}
-
-void RtmpClientStream::ReplaceSocketForStream(
+StreamUserData* RtmpClientStream::OnCreatingStream(
     SocketUniquePtr* inout, Controller* cntl) {
     {
         std::unique_lock<butil::Mutex> mu(_state_mutex);
         if (_state == STATE_ERROR || _state == STATE_DESTROYING) {
             cntl->SetFailed(EINVAL, "Fail to replace socket for stream, _state is error or destroying");
-            return;
+            return NULL;
         }
     }
     SocketId esid;
     if (cntl->connection_type() == CONNECTION_TYPE_SHORT) {
         if (_client_impl->CreateSocket((*inout)->remote_side(), &esid) != 0) {
             cntl->SetFailed(EINVAL, "Fail to create RTMP socket");
-            return;
+            return NULL;
         }
     } else {
         if (_client_impl->socket_map().Insert(
                 SocketMapKey((*inout)->remote_side()), &esid) != 0) {
             cntl->SetFailed(EINVAL, "Fail to get the RTMP socket");
-            return;
+            return NULL;
         }
     }
     SocketUniquePtr tmp_ptr;
@@ -1718,12 +1706,13 @@ void RtmpClientStream::ReplaceSocketForStream(
         cntl->SetFailed(EFAILEDSOCKET, "Fail to address RTMP SocketId=%" PRIu64
                         " from SocketMap of RtmpClient=%p",
                         esid, _client_impl.get());
-        return;
+        return NULL;
     }
     RPC_VLOG << "Replace Socket For Stream, RTMP socketId=" << esid
              << ", main socketId=" << (*inout)->id();
     tmp_ptr->ShareStats(inout->get());
     inout->reset(tmp_ptr.release());
+    return this;
 }
 
 int RtmpClientStream::RunOnFailed(bthread_id_t id, void* data, int) {
@@ -1758,15 +1747,31 @@ void RtmpClientStream::OnFailedToCreateStream() {
     return OnStopInternal();
 }
 
-void RtmpClientStream::OnStreamCreationDone(SocketUniquePtr& sending_sock,
-                                            Controller* cntl) {
-    // Always move sending_sock into _rtmpsock.
-    // - If the RPC is successful, moving sending_sock prevents it from
-    //   setfailed in Controller after calling this method.
-    // - If the RPC is failed, OnStopInternal() can clean up the socket_map
-    //   inserted in ReplaceSocketForStream().
-    _rtmpsock.swap(sending_sock);
-    
+void RtmpClientStream::DestroyStreamUserData(SocketUniquePtr& sending_sock,
+                                             Controller* cntl,
+                                             int /*error_code*/,
+                                             bool end_of_rpc) {
+    if (!end_of_rpc) {
+        if (sending_sock) {
+            if (_from_socketmap) {
+                _client_impl->socket_map().Remove(SocketMapKey(sending_sock->remote_side()),
+                        sending_sock->id());
+            } else {
+                sending_sock->SetFailed();  // not necessary, already failed.
+            }
+        }
+    } else {
+        // Always move sending_sock into _rtmpsock at the end of rpc.
+        // - If the RPC is successful, moving sending_sock prevents it from
+        //   setfailed in Controller after calling this method.
+        // - If the RPC is failed, OnStopInternal() can clean up the socket_map
+        //   inserted in OnCreatingStream().
+        _rtmpsock.swap(sending_sock);
+    }
+}
+
+
+void RtmpClientStream::DestroyStreamCreator(Controller* cntl) {
     if (cntl->Failed()) {
         if (_rtmpsock != NULL &&
             // ^ If sending_sock is NULL, the RPC fails before _pack_request
@@ -1888,7 +1893,7 @@ void RtmpClientStream::OnStopInternal() {
         LOG(FATAL) << "RtmpContext of " << *_rtmpsock << " is NULL";
     }
     if (_from_socketmap) {
-        _client_impl->socket_map().Remove(_rtmpsock->remote_side(),
+        _client_impl->socket_map().Remove(SocketMapKey(_rtmpsock->remote_side()),
                                           _rtmpsock->id());
     } else {
         _rtmpsock->ReleaseAdditionalReference();

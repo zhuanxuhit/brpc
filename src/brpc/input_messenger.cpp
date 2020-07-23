@@ -1,18 +1,20 @@
-// Copyright (c) 2014 Baidu, Inc.
-// 
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-// 
-//     http://www.apache.org/licenses/LICENSE-2.0
-// 
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
 
-// Authors: Ge,Jun (gejun@baidu.com)
 
 #include <gflags/gflags.h>
 #include "butil/fd_guard.h"                      // fd_guard
@@ -59,9 +61,9 @@ const size_t MAX_ONCE_READ = 524288;
 
 ParseResult InputMessenger::CutInputMessage(
         Socket* m, size_t* index, bool read_eof) {
-    const int preferred = m->_preferred_index;
+    const int preferred = m->preferred_index();
     const int max_index = (int)_max_index.load(butil::memory_order_acquire);
-    // Try preferred handler first. The _preferred_index is set on last
+    // Try preferred handler first. The preferred_index is set on last
     // selection or by client.
     if (preferred >= 0 && preferred <= max_index
             && _handlers[preferred].parse != NULL) {
@@ -95,7 +97,7 @@ ParseResult InputMessenger::CutInputMessage(
         if (m->parsing_context()) {
             m->reset_parsing_context(NULL);
         }
-        m->_preferred_index = -1;
+        m->set_preferred_index(-1);
     }
     for (int i = 0; i <= max_index; ++i) {
         if (i == preferred || _handlers[i].parse == NULL) {
@@ -105,7 +107,7 @@ ParseResult InputMessenger::CutInputMessage(
         ParseResult result = _handlers[i].parse(&m->_read_buf, m, read_eof, _handlers[i].arg);
         if (result.is_ok() ||
             result.error() == PARSE_ERROR_NOT_ENOUGH_DATA) {
-            m->_preferred_index = i;
+            m->set_preferred_index(i);
             *index = i;
             return result;
         } else if (result.error() != PARSE_ERROR_TRY_OTHERS) {
@@ -202,8 +204,7 @@ void InputMessenger::OnNewMessages(Socket* m) {
                 // Set `read_eof' flag and proceed to feed EOF into `Protocol'
                 // (implied by m->_read_buf.empty), which may produce a new
                 // `InputMessageBase' under some protocols such as HTTP
-                LOG_IF(WARNING, FLAGS_log_connection_close)
-                        << "Remote side of " << *m << " was closed";
+                LOG_IF(WARNING, FLAGS_log_connection_close) << *m << " was closed by remote side";
                 read_eof = true;                
             } else if (errno != EAGAIN) {
                 if (errno == EINTR) {
@@ -241,7 +242,7 @@ void InputMessenger::OnNewMessages(Socket* m) {
                 } else if (pr.error() == PARSE_ERROR_TRY_OTHERS) {
                     LOG(WARNING)
                         << "Close " << *m << " due to unknown message: "
-                        << butil::PrintedAsBinary(m->_read_buf);
+                        << butil::ToPrintable(m->_read_buf);
                     m->SetFailed(EINVAL, "Close %s due to unknown message",
                                  m->description().c_str());
                     return;

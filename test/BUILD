@@ -1,3 +1,17 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 load("//:bazel/brpc.bzl", "brpc_proto_library")
 
@@ -69,7 +83,6 @@ TEST_BUTIL_SOURCES = [
     "guid_unittest.cc",
     "hash_unittest.cc",
     "lazy_instance_unittest.cc",
-    "md5_unittest.cc",
     "aligned_memory_unittest.cc",
     "linked_ptr_unittest.cc",
     "ref_counted_memory_unittest.cc",
@@ -114,7 +127,6 @@ TEST_BUTIL_SOURCES = [
     "thread_local_storage_unittest.cc",
     "thread_local_unittest.cc",
     "watchdog_unittest.cc",
-    "pr_time_unittest.cc",
     "time_unittest.cc",
     "version_unittest.cc",
     "logging_unittest.cc",
@@ -137,9 +149,12 @@ TEST_BUTIL_SOURCES = [
     "flat_map_unittest.cpp",
     "crc32c_unittest.cc",
     "iobuf_unittest.cpp",
+    "object_pool_unittest.cpp",
     "test_switches.cc",
     "scoped_locale.cc",
+    "recordio_unittest.cpp",
     #"popen_unittest.cpp",
+    "bounded_queue_unittest.cc",
     "butil_unittest_main.cpp",
 ] + select({
         "@bazel_tools//tools/osx:darwin": [],
