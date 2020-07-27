@@ -1,0 +1,11 @@
+version: "3"
+
+services:
+  env:
+    image: linux-brpc-env:latest
+    container_name: linux-brpc-env
+    ports:
+      - "45679:22"
+      - "8731:873"
+    cap_add:
+      - ALL
