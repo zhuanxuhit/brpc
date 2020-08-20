@@ -661,6 +661,7 @@ namespace internal {
 int FastPthreadMutex::lock_contended() {
     butil::atomic<unsigned>* whole = (butil::atomic<unsigned>*)&_futex;
     while (whole->exchange(BTHREAD_MUTEX_CONTENDED) & BTHREAD_MUTEX_LOCKED) {
+        // 互斥量等待
         if (futex_wait_private(whole, BTHREAD_MUTEX_CONTENDED, NULL) < 0
             && errno != EWOULDBLOCK) {
             return errno;
@@ -671,7 +672,11 @@ int FastPthreadMutex::lock_contended() {
 
 void FastPthreadMutex::lock() {
     bthread::MutexInternal* split = (bthread::MutexInternal*)&_futex;
+    // exchange, read-modify-write
+    // 返回锁之前的值
     if (split->locked.exchange(1, butil::memory_order_acquire)) {
+        // 已经被锁了
+        // 这个不处理错误吗？
         (void)lock_contended();
     }
 }

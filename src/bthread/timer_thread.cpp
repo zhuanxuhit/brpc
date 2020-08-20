@@ -221,6 +221,7 @@ TimerThread::TaskId TimerThread::schedule(
         return INVALID_TASK_ID;
     }
     // Hashing by pthread id is better for cache locality.
+    // Asking: 为啥会更好？
     const Bucket::ScheduleResult result = 
         _buckets[butil::fmix64(pthread_numeric_id()) % _options.num_buckets]
         .schedule(fn, arg, abstime);
@@ -236,6 +237,7 @@ TimerThread::TaskId TimerThread::schedule(
             }
         }
         if (earlier) {
+            // 唤醒
             futex_wake_private(&_nsignals, 1);
         }
     }
@@ -268,6 +270,7 @@ int TimerThread::unschedule(TaskId task_id) {
             butil::memory_order_acquire)) {
         return 0;
     }
+    // 这是啥？
     return (expected_version == id_version + 1) ? 1 : -1;
 }
 
@@ -284,6 +287,7 @@ bool TimerThread::Task::run_and_delete() {
         butil::return_resource(slot_of_task_id(task_id));
         return true;
     } else if (expected_version == id_version + 2) {
+        // 发现已经取消了
         // already unscheduled.
         butil::return_resource(slot_of_task_id(task_id));
         return false;
@@ -349,13 +353,14 @@ void TimerThread::run() {
         }
         
         // Pull tasks from buckets.
+        // 从所有buckets中将task都放入tasks中
         for (size_t i = 0; i < _options.num_buckets; ++i) {
             Bucket& bucket = _buckets[i];
             for (Task* p = bucket.consume_tasks(); p != nullptr; ++nscheduled) {
                 // p->next should be kept first
                 // in case of the deletion of Task p which is unscheduled
                 Task* next_task = p->next;
-
+                // 如果task标识为删除，则不放入tasks
                 if (!p->try_delete()) { // remove the task if it's unscheduled
                     tasks.push_back(p);
                     std::push_heap(tasks.begin(), tasks.end(), task_greater);

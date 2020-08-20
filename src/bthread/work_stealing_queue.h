@@ -69,13 +69,18 @@ public:
     // Returns true on pushed.
     // May run in parallel with steal().
     // Never run in parallel with pop() or another push().
+    // 本地工作线程往队列**尾部**push和pop队列数据
     bool push(const T& x) {
         const size_t b = _bottom.load(butil::memory_order_relaxed);
+        // steal函数会修改_top值，此处使用memory_order_acquire，是为了保证肯定能获取到steal中的修改
         const size_t t = _top.load(butil::memory_order_acquire);
         if (b >= t + _capacity) { // Full queue.
             return false;
         }
+        // 相当于取余，第一个元素放在了下标为1的位置
         _buffer[b & (_capacity - 1)] = x;
+        // store和load的默认级别是：memory_order_release 和 memory_order_acquire
+        // bottom值只有push/pop自己这个线程会修改，其他线程steal时都只是读而已
         _bottom.store(b + 1, butil::memory_order_release);
         return true;
     }
@@ -94,19 +99,27 @@ public:
         }
         const size_t newb = b - 1;
         _bottom.store(newb, butil::memory_order_relaxed);
+        // memory_order_seq_cst 保证操作顺讯，不会重排，steal会去修改top，所以我们要保证下面的top获取到的是最新值
         butil::atomic_thread_fence(butil::memory_order_seq_cst);
         t = _top.load(butil::memory_order_relaxed);
         if (t > newb) {
+            // 说明steal已经从top将元素取出，此处不能pop
             _bottom.store(b, butil::memory_order_relaxed);
             return false;
         }
+        // 取出元素
         *val = _buffer[newb & (_capacity - 1)];
+        // 若相等则存在单个元素竞争的情况，要进行下一步判断
+        // 若不等则至少有两个元素，最多又只有一个steal，所以肯定可以return true
         if (t != newb) {
             return true;
         }
+        // 此处 t == newb，即只剩下一个元素了，我们要防止steal偷取，怎么办呢？
+        // 我们直接让top加一，可以保证 top > newb，偷取不了
         // Single last element, compete with steal()
         const bool popped = _top.compare_exchange_strong(
             t, t + 1, butil::memory_order_seq_cst, butil::memory_order_relaxed);
+        // 不管上面poped成不成功，我们都需要调整_bottom
         _bottom.store(b, butil::memory_order_relaxed);
         return popped;
     }
@@ -114,7 +127,10 @@ public:
     // Steal one item from the queue.
     // Returns true on stolen.
     // May run in parallel with push() pop() or another steal().
+    // steal不是工作线程调用，而是其他线程调用，会和push和pop存在竞争
+    // 但是steal是调整的top，push和pop调整bottom，相对来说竞争小
     bool steal(T* val) {
+        // 此处 memory_order_acquire 确保，push和pop操作可见性
         size_t t = _top.load(butil::memory_order_acquire);
         size_t b = _bottom.load(butil::memory_order_acquire);
         if (t >= b) {
@@ -124,6 +140,8 @@ public:
         do {
             butil::atomic_thread_fence(butil::memory_order_seq_cst);
             b = _bottom.load(butil::memory_order_acquire);
+            // 此处判断的时候，有可能还是 t = b - 1,但是马上pop的时候，b就减1了，此时就出现
+            // t == b，然后我们此处steal要和pop争抢最后一个元素
             if (t >= b) {
                 return false;
             }

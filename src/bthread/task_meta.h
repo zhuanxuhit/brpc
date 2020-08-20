@@ -50,7 +50,10 @@ const static LocalStorage LOCAL_STORAGE_INIT = BTHREAD_LOCAL_STORAGE_INITIALIZER
 
 struct TaskMeta {
     // [Not Reset]
+    // 用于Bthread 在 bmutex 挂起和唤醒（比如在该执行体调用brpc的接口发送rpc请求的时候
+    // 使用 bmutex 实现同步的时候，为了防止阻塞pthread，通过这个item将执行体挂起）
     butil::atomic<ButexWaiter*> current_waiter;
+    // 存放的是 sleep_id，timerThread 中得到的
     uint64_t current_sleep;
 
     // A builtin flag to mark if the thread is stopping.
@@ -66,6 +69,7 @@ struct TaskMeta {
     pthread_spinlock_t version_lock;
     
     // [Not Reset] only modified by one bthread at any time, no need to be atomic
+    // 在构造函数中初始化为1
     uint32_t* version_butex;
 
     // The identifier. It does not have to be here, however many code is
@@ -89,6 +93,8 @@ struct TaskMeta {
     // bthread local storage, sync with tls_bls (defined in task_group.cpp)
     // when the bthread is created or destroyed.
     // DO NOT use this field directly, use tls_bls instead.
+    // 一直没看到怎么用的了？
+    // 用于记录一些bthread运行状态（如各类统计值）等的一块内存
     LocalStorage local_storage;
 
 public:

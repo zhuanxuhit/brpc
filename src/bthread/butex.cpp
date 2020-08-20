@@ -94,11 +94,18 @@ struct ButexWaiter : public butil::LinkNode<ButexWaiter> {
 // non_pthread_task allocates this structure on stack and queue it in
 // Butex::waiters.
 struct ButexBthreadWaiter : public ButexWaiter {
+    // 执行bthread的TaskMeta结构的指针。
     TaskMeta* task_meta;
     TimerThread::TaskId sleep_id;
+    // 状态标记，根据锁变量当前状态是否发生改变，waiter_state会被设为不同的值。
     WaiterState waiter_state;
+    // expected_value存储的是当bthread竞争互斥锁失败时锁变量的值，由于从bthread竞争互斥锁失败到bthread挂起
+    // 有一定的时间间隔，在这个时间间隔内锁变量的值可能会发生变化，也许锁已经被释放了，那么之前竞争锁失败的bthread
+    // 就不应挂起，否则可能永远不会被唤醒了，它应该放弃挂起动作，再去竞争互斥锁。所以一个bthread在执行挂起动作前
+    // 一定要再次去查看锁变量的当前最新值，只有锁变量当前最新值等于expected_value时才能真正执行挂起动作。
     int expected_value;
     Butex* initial_butex;
+    // 指向全局唯一的TaskControl单例对象的指针
     TaskControl* control;
 };
 
@@ -462,6 +469,9 @@ inline bool erase_from_butex(ButexWaiter* bw, bool wakeup, WaiterState state) {
     // `bw' is guaranteed to be valid inside this function because waiter
     // will wait until this function being cancelled or finished.
     // NOTE: This function must be no-op when bw->container is NULL.
+    // 怎么确保 bw 是有效的，bw 是在 bthread 的私有栈上，
+    // 会确保 butex_wait 函数退出前，定时器要么执行完，要么取消了
+    // 当 bw->container == null，说明没有 wait 成功
     bool erased = false;
     Butex* b;
     int saved_errno = errno;
@@ -511,6 +521,7 @@ static void wait_for_butex(void* arg) {
     {
         BAIDU_SCOPED_LOCK(b->waiter_lock);
         if (b->value.load(butil::memory_order_relaxed) != bw->expected_value) {
+            // 在上锁未成功到挂起之间，有了变化，
             bw->waiter_state = WAITER_STATE_UNMATCHEDVALUE;
         } else if (bw->waiter_state == WAITER_STATE_READY/*1*/ &&
                    !bw->task_meta->interrupted) {
@@ -524,8 +535,13 @@ static void wait_for_butex(void* arg) {
     // TaskGroup::interrupt() no-op, there's no race between following code and
     // the two functions. The on-stack ButexBthreadWaiter is safe to use and
     // bw->waiter_state will not change again.
+    // 到这有3种可能
+    // 1. timeout了，
+    // 2. taskMeta 被打断了
+    // 3. butex的value发生了变化
+    // 反正是都wait不成功，需要重新执行
     unsleep_if_necessary(bw, get_global_timer_thread());
-    tls_task_group->ready_to_run(bw->tid);
+    tls_task_group->ready_to_run(bw->tid/*,false*/);
     // FIXME: jump back to original thread is buggy.
     
     // // Value unmatched or waiter is already woken up by TimerThread, jump
@@ -606,9 +622,11 @@ static int butex_wait_from_pthread(TaskGroup* g, Butex* b, int expected_value,
     }
     return rc;
 }
-
+// arg是指向Butex::value锁变量的指针，expected_value是bthread竞争锁失败时锁变量的值。
 int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+    // 如果锁变量当前最新值不等于expected_value，则锁的状态发生了变化，当前bthread不再执行挂起动作，
+    // 直接返回，在外层代码中继续去竞争锁。
     if (b->value.load(butil::memory_order_relaxed) != expected_value) {
         errno = EWOULDBLOCK;
         // Sometimes we may take actions immediately after unmatched butex,
@@ -618,10 +636,12 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     }
     TaskGroup* g = tls_task_group;
     if (NULL == g || g->is_current_pthread_task()) {
+        // 当前代码不在bthread中执行而是在直接在pthread上执行，调用butex_wait_from_pthread让pthread挂起。
         return butex_wait_from_pthread(g, b, expected_value, abstime);
     }
+    // 创建ButexBthreadWaiter类型的局部变量bbw，bbw是分配在bthread的私有栈空间上的。
     ButexBthreadWaiter bbw;
-    // tid is 0 iff the thread is non-bthread
+    // tid is 0 if the thread is non-bthread
     bbw.tid = g->current_tid();
     bbw.container.store(NULL, butil::memory_order_relaxed);
     bbw.task_meta = g->current_task();
@@ -655,11 +675,20 @@ int butex_wait(void* arg, int expected_value, const timespec* abstime) {
     // release fence matches with acquire fence in interrupt_and_consume_waiters
     // in task_group.cpp to guarantee visibility of `interrupted'.
     bbw.task_meta->current_waiter.store(&bbw, butil::memory_order_release);
+    // pthread在执行任务队列中下一个bthread前，会先执行wait_for_butex()将刚创建的bbw对象放入锁的等待队列
     g->set_remained(wait_for_butex, &bbw);
+    // 当前bthread yield让出cpu，pthread会从TaskGroup的任务队列中取出下一个bthread去执行。
     TaskGroup::sched(&g);
+
+    // 这里是butex_wait()恢复执行时的开始执行点
+    // 两种情况回到这里：
+    // 1. 超时：执行 erase_from_butex_and_wakeup
+    // 2. 被唤醒，先切换出去执行 wait_for_butex，再回来
 
     // erase_from_butex_and_wakeup (called by TimerThread) is possibly still
     // running and using bbw. The chance is small, just spin until it's done.
+    // 什么情况下会出现这种case呢？
+    // bthread被唤醒了，但是 sleep_id 需要取消
     BT_LOOP_WHEN(unsleep_if_necessary(&bbw, get_global_timer_thread()) < 0,
                  30/*nops before sched_yield*/);
     

@@ -176,6 +176,8 @@ int TaskControl::init(int concurrency) {
     // Wait for at least one group is added so that choose_one_group()
     // never returns NULL.
     // TODO: Handle the case that worker quits before add_group
+    // _ngroup 是 atomic，默认读取是 acquire，能保证别的线程修改后看到的
+    // 当其他pthread启动后，会去增加 _ngroup
     while (_ngroup == 0) {
         usleep(100);  // TODO: Elaborate
     }
@@ -369,12 +371,16 @@ void TaskControl::signal_task(int num_task) {
     // be created to match caller's requests. But in another side, there's also
     // many useless signalings according to current impl. Capping the concurrency
     // is a good balance between performance and timeliness of scheduling.
+    // 为什么if (num_task > 2) num_task = 2;这样多余的任务不是没有被取走
     if (num_task > 2) {
         num_task = 2;
     }
     int start_index = butil::fmix64(pthread_numeric_id()) % PARKING_LOT_NUM;
+    // 优先唤醒本workerThread，workerThread都wait在 run_main_task函数的 wait_task上
+    // 此处即使是 _pl[start_index] ，也不一定能唤醒当前的pthread，
     num_task -= _pl[start_index].signal(1);
     if (num_task > 0) {
+        // 如果还有任务需要处理，则此时唤醒其他TaskGroup
         for (int i = 1; i < PARKING_LOT_NUM && num_task > 0; ++i) {
             if (++start_index >= PARKING_LOT_NUM) {
                 start_index = 0;

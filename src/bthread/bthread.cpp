@@ -30,7 +30,7 @@
 
 namespace bthread {
 
-DEFINE_int32(bthread_concurrency, 8 + BTHREAD_EPOLL_THREAD_NUM,
+DEFINE_int32(bthread_concurrency, 8 + BTHREAD_EPOLL_THREAD_NUM, /*8+1*/
              "Number of pthread workers");
 
 DEFINE_int32(bthread_min_concurrency, 0,
@@ -61,6 +61,7 @@ pthread_mutex_t g_task_control_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Referenced in rpc, needs to be extern.
 // Notice that we can't declare the variable as atomic<TaskControl*> which
 // are not constructed before main().
+// 啥意思？
 TaskControl* g_task_control = NULL;
 
 extern BAIDU_THREAD_LOCAL TaskGroup* tls_task_group;
@@ -71,7 +72,10 @@ inline TaskControl* get_task_control() {
 }
 
 inline TaskControl* get_or_new_task_control() {
-    butil::atomic<TaskControl*>* p = (butil::atomic<TaskControl*>*)&g_task_control;
+    // 要改变 g_task_control 的值，g_task_control 本身是 TaskControl*，然后如果是 atomic 的话，
+    // 他的声明应该是：butil::atomic<TaskControl*>，现在我们要改变这个变量的值，
+    // 我们只能在声明一个指针的
+    auto p = (butil::atomic<TaskControl*>*)&g_task_control;
     TaskControl* c = p->load(butil::memory_order_consume);
     if (c != NULL) {
         return c;
@@ -125,6 +129,7 @@ start_from_non_worker(bthread_t* __restrict tid,
                       const bthread_attr_t* __restrict attr,
                       void * (*fn)(void*),
                       void* __restrict arg) {
+    // 如果是第一次获取task_control，会做响应的初始化，建立worker thread
     TaskControl* c = get_or_new_task_control();
     if (NULL == c) {
         return ENOMEM;
@@ -169,13 +174,32 @@ struct TidJoiner {
 
 extern "C" {
 
+/**
+ * @brief:一个bthread 1在自己的任务函数执行过程中需要创建新的bthread 2时，
+ * 会调用TaskGroup::start_foreground()，
+ * 在start_foreground()内完成bthread 2的TaskMeta对象的创建，
+ * 并调用sched_to()让pthread去执行bthread 2的任务函数。
+ * pthread在真正执行bthread 2的任务函数前会将bthread 1的tid重新压入TaskGroup的任务队列，
+ * bthread 1不久之后会再次被调度执行。
+ * @param tid
+ * @param attr
+ * @param fn
+ * @param arg
+ * @return
+ */
 int bthread_start_urgent(bthread_t* __restrict tid,
                          const bthread_attr_t* __restrict attr,
                          void * (*fn)(void*),
                          void* __restrict arg) {
+    // tls_task_group 什么时候初始化呢？
+    // TaskControl::worker_thread 中会设置 tls_task_group 的值
+    // worker_thread 函数是会在 TaskControl::init 中创建 pthread 时设置
+    // worker_thread 是工作线程的主要函数
+    // 所有当g存在，说明我们是在工作线程中启动的
     bthread::TaskGroup* g = bthread::tls_task_group;
     if (g) {
         // start from worker
+        // 此处为什么会传入 &g，因为有可能会在 start_foreground 中更改 g 所指向的订单
         return bthread::TaskGroup::start_foreground(&g, tid, attr, fn, arg);
     }
     return bthread::start_from_non_worker(tid, attr, fn, arg);
@@ -357,6 +381,8 @@ int bthread_timer_del(bthread_timer_t id) {
 
 int bthread_usleep(uint64_t microseconds) {
     bthread::TaskGroup* g = bthread::tls_task_group;
+    // 如果是pthread_task，相当于是 main_thread 运行着，直接调用sleep即可，否则
+    // 如果是其他bthread，我们需要进行bthread切换
     if (NULL != g && !g->is_current_pthread_task()) {
         return bthread::TaskGroup::usleep(&g, microseconds);
     }

@@ -73,6 +73,7 @@ BAIDU_THREAD_LOCAL void* tls_unique_user_ptr = NULL;
 const TaskStatistics EMPTY_STAT = { 0, 0 };
 
 const size_t OFFSET_TABLE[] = {
+        // 这里面这些值是哪来的？
 #include "bthread/offset_inl.list"
 };
 
@@ -115,7 +116,13 @@ bool TaskGroup::is_stopped(bthread_t tid) {
     return true;
 }
 
+/**
+ * @brief:wait_task()函数负责等待一个bthread，如果当前没有bthread可执行，则pthread会挂起。
+ * @param tid
+ * @return
+ */
 bool TaskGroup::wait_task(bthread_t* tid) {
+
     do {
 #ifndef BTHREAD_DONT_SAVE_PARKING_STATE
         if (_last_pl_state.stopped()) {
@@ -149,10 +156,17 @@ void TaskGroup::run_main_task() {
     
     TaskGroup* dummy = this;
     bthread_t tid;
+
     while (wait_task(&tid)) {
+
         TaskGroup::sched_to(&dummy, tid);
+        // run_main_task()恢复执行的开始执行点。
         DCHECK_EQ(this, dummy);
+        // 这个为啥一定是相等的呢？
+        // sched_to 是调度到新的tid上，返回到这的时候，又相当于回到了main bthread上，
+        // 所以 _cur_meta->stack 肯定等于 _main_stack
         DCHECK_EQ(_cur_meta->stack, _main_stack);
+        // 没想明白，什么时候会出现不相等的情况呢？
         if (_cur_meta->tid != _main_tid) {
             TaskGroup::task_runner(1/*skip remained*/);
         }
@@ -250,12 +264,14 @@ int TaskGroup::init(size_t runqueue_capacity) {
 }
 
 void TaskGroup::task_runner(intptr_t skip_remained) {
+    // skip_remained 是在 bthread_jump_fcontext 第3个参数
     // NOTE: tls_task_group is volatile since tasks are moved around
     //       different groups.
     TaskGroup* g = tls_task_group;
 
     if (!skip_remained) {
         while (g->_last_context_remained) {
+            // 这里面的函数就是将上一个bthread入队
             RemainedFn fn = g->_last_context_remained;
             g->_last_context_remained = NULL;
             fn(g->_last_context_remained_arg);
@@ -293,6 +309,7 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
         // libraries.
         void* thread_return;
         try {
+            // 执行应用程序设置的任务函数，在任务函数中可能yield让出cpu，也可能产生新的bthread。
             thread_return = m->fn(m->arg);
         } catch (ExitException& e) {
             thread_return = e.value();
@@ -333,13 +350,15 @@ void TaskGroup::task_runner(intptr_t skip_remained) {
                 ++*m->version_butex;
             }
         }
+        // 任务函数执行完成后，需要唤起等待该任务函数执行结束的pthread/bthread。
         butex_wake_except(m->version_butex, 0);
 
         g->_control->_nbthreads << -1;
         g->set_remained(TaskGroup::_release_last_context, m);
+        // 将pthread线程执行流转入下一个可执行的bthread（普通bthread或pthread的调度bthread）。
         ending_sched(&g);
-        
-    } while (g->_cur_meta->tid != g->_main_tid);
+
+    } while (g->_cur_meta->tid != g->_main_tid); // 只要还有其他任务执行，则会一直执行bthread
     
     // Was called from a pthread and we don't have BTHREAD_STACKTYPE_PTHREAD
     // tasks to run, quit for more tasks.
@@ -355,7 +374,15 @@ void TaskGroup::_release_last_context(void* arg) {
     }
     return_resource(get_slot(m->tid));
 }
-
+/**
+ * @brief:在前台创建一个任务，立即执行，
+ * @param pg
+ * @param th
+ * @param attr
+ * @param fn
+ * @param arg
+ * @return
+ */
 int TaskGroup::start_foreground(TaskGroup** pg,
                                 bthread_t* __restrict th,
                                 const bthread_attr_t* __restrict attr,
@@ -371,6 +398,8 @@ int TaskGroup::start_foreground(TaskGroup** pg,
     if (__builtin_expect(!m, 0)) {
         return ENOMEM;
     }
+    // 确保新的任务没有没有等待，那什么时候设置这个值呢？
+    // 当当前bthread由于阻塞需要等待的时候
     CHECK(m->current_waiter.load(butil::memory_order_relaxed) == NULL);
     m->stop = false;
     m->interrupted = false;
@@ -390,8 +419,13 @@ int TaskGroup::start_foreground(TaskGroup** pg,
 
     TaskGroup* g = *pg;
     g->_control->_nbthreads << 1;
+    // 什么叫 current_pthread_task，即当前任务是直接在thread栈上执行的
     if (g->is_current_pthread_task()) {
+        // 刚开始初始化的时候，is_current_pthread_task 为 True，此时我们不应该进行直接切换
+        // 只是将要运行的任务放入本地队列中，why?
+        // 因为此时切换的话，我们会将 main_tid 也入队，这个是没有必要的
         // never create foreground task in pthread.
+        // 不要在pthread上创建前台任务，为什么？
         g->ready_to_run(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL));
     } else {
         // NOSIGNAL affects current task, not the new task.
@@ -401,6 +435,7 @@ int TaskGroup::start_foreground(TaskGroup** pg,
         } else {
             fn = ready_to_run_in_worker;
         }
+        // 这个是args是在当前函数栈上，传入的是地址，那怎么保证切换后这个地址还在呢？
         ReadyToRunArgs args = {
             g->current_tid(),
             (bool)(using_attr.flags & BTHREAD_NOSIGNAL)
@@ -442,6 +477,7 @@ int TaskGroup::start_background(bthread_t* __restrict th,
     if (using_attr.flags & BTHREAD_LOG_START_AND_FINISH) {
         LOG(INFO) << "Started bthread " << m->tid;
     }
+    // 重载操作符为+1
     _control->_nbthreads << 1;
     if (REMOTE) {
         ready_to_run_remote(m->tid, (using_attr.flags & BTHREAD_NOSIGNAL));
@@ -504,7 +540,14 @@ TaskStatistics TaskGroup::main_stat() const {
     TaskMeta* m = address_meta(_main_tid);
     return m ? m->stat : EMPTY_STAT;
 }
-
+/**
+ * @brief: bthread任务函数结束完后会调用ending_sched()，
+ * 在ending_sched()内会尝试从本地TaskGroup的任务队列中找出下一个bthread，
+ * 或者从其他pthread的TaskGroup上steal一个bthread，
+ * 如果没有bthread可用则下一个被执行的就是pthread的“调度bthread”，
+ * 通过sched_to()将pthread的执行流转入下一个bthread的任务函数。
+ * @param pg
+ */
 void TaskGroup::ending_sched(TaskGroup** pg) {
     TaskGroup* g = *pg;
     bthread_t next_tid = 0;
@@ -524,10 +567,12 @@ void TaskGroup::ending_sched(TaskGroup** pg) {
 
     TaskMeta* const cur_meta = g->_cur_meta;
     TaskMeta* next_meta = address_meta(next_tid);
-    if (next_meta->stack == NULL) {
+    if (next_meta->stack == NULL) { // 如果是main_thread, next_meta->stack 是 null
         if (next_meta->stack_type() == cur_meta->stack_type()) {
             // also works with pthread_task scheduling to pthread_task, the
             // transfered stack is just _main_stack.
+            // 堆栈还能直接交换。堆栈里面不是存放着bthread的各种寄存器信息嘛？
+            // 因为 cur_meta 所对应的 bthread 已经运行结束了，其栈也没用了
             next_meta->set_stack(cur_meta->release_stack());
         } else {
             ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner);
@@ -571,24 +616,30 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
     }
 #endif
     // Save errno so that errno is bthread-specific.
+    // 这两个是bthread相关的，我们在切换前保存，切换到另一个bthread后，再将其恢复
     const int saved_errno = errno;
     void* saved_unique_user_ptr = tls_unique_user_ptr;
-
+    // 此处const表示指针是常量
     TaskMeta* const cur_meta = g->_cur_meta;
     const int64_t now = butil::cpuwide_time_ns();
     const int64_t elp_ns = now - g->_last_run_ns;
     g->_last_run_ns = now;
     cur_meta->stat.cputime_ns += elp_ns;
     if (cur_meta->tid != g->main_tid()) {
+        // 如果一个bthread在执行过程中生成了新的bthread，会走到这里
         g->_cumulated_cputime_ns += elp_ns;
     }
     ++cur_meta->stat.nswitch;
     ++ g->_nswitch;
     // Switch to the task
     if (__builtin_expect(next_meta != cur_meta, 1)) {
+        // 将_cur_meta指向下一个将要执行的bthread的TaskMeta对象的指针。
         g->_cur_meta = next_meta;
-        // Switch tls_bls
+        // Switch tls_bls，记录当前thread的local_storage
+        // tls_bls存储的是当前bthread的一些运行期数据（统计量等），执行切换动作前，将tls_bls的内容复制到
+        // 当前bthread的私有storage空间中，再将tls_bls重新指向将要执行的bthread的私有storage。
         cur_meta->local_storage = tls_bls;
+        // 更新 tls_bls 为要交换的 taskMeta的 local_storage
         tls_bls = next_meta->local_storage;
 
         // Logging must be done after switching the local storage, since the logging lib 
@@ -601,8 +652,19 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
 
         if (cur_meta->stack != NULL) {
             if (next_meta->stack != cur_meta->stack) {
+                // 正常情况下都是不相等，相等的情况是都是 pthread_task
+                // 进行task切换
+                // 这里真正执行bthread的切换。
+                // 将执行pthread的cpu的寄存器的当前状态存入cur_meta的context中，并将next_meta的context中
+                // 的数据加载到cpu的寄存器中，开始执行next_meta的任务函数。
                 jump_stack(cur_meta->stack, next_meta->stack);
+                // jump_stack 在切换到新的bthread的同时，也会下一步执行的地址放入到当前bthread的堆栈上
+                // 当再次返回时，会执行到下面的语句，此时有可能被调度到了其他pthread上了
                 // probably went to another group, need to assign g again.
+                // 这是什么情况？因为有可能切换到另一个steal来的bthread上，此时我们要重新
+                // 获取下当前thread的 taskGroup
+                // 这里是cur_meta代表的bthread的恢复执行点。
+                // bthread恢复执行的时候可能被steal到其他pthread上了，需要重置TaskGroup对象的指针g。
                 g = tls_task_group;
             }
 #ifndef NDEBUG
@@ -625,7 +687,7 @@ void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
         g = tls_task_group;
     }
 
-    // Restore errno
+    // Restore errno，这个的作用是？
     errno = saved_errno;
     tls_unique_user_ptr = saved_unique_user_ptr;
 
@@ -643,7 +705,11 @@ void TaskGroup::destroy_self() {
         CHECK(false);
     }
 }
-
+/**
+ * @brief:将tid放入本地队列，根据是否信号触发，唤醒任务
+ * @param tid
+ * @param nosignal
+ */
 void TaskGroup::ready_to_run(bthread_t tid, bool nosignal) {
     push_rq(tid);
     if (nosignal) {
@@ -712,11 +778,12 @@ void TaskGroup::flush_nosignal_tasks_general() {
     return flush_nosignal_tasks_remote();
 }
 
+// 当bthread切换后，把前一个bthread重新放入队列中
 void TaskGroup::ready_to_run_in_worker(void* args_in) {
     ReadyToRunArgs* args = static_cast<ReadyToRunArgs*>(args_in);
     return tls_task_group->ready_to_run(args->tid, args->nosignal);
 }
-
+// 当bthread切换后，把前一个bthread重新放入队列中，当时因为已经要结束了，所以只是入队，不会执行
 void TaskGroup::ready_to_run_in_worker_ignoresignal(void* args_in) {
     ReadyToRunArgs* args = static_cast<ReadyToRunArgs*>(args_in);
     return tls_task_group->push_rq(args->tid);
@@ -729,16 +796,29 @@ struct SleepArgs {
     TaskGroup* group;
 };
 
+/**
+ * @brief: 到期后运行的函数
+ * @param arg
+ */
 static void ready_to_run_from_timer_thread(void* arg) {
     CHECK(tls_task_group == NULL);
     const SleepArgs* e = static_cast<const SleepArgs*>(arg);
+    // 此处是从 TimerThread 中运行的，选择一个group，放入remote队列中
     e->group->control()->choose_one_group()->ready_to_run_remote(e->tid);
 }
 
+/**
+ * @brief: 当bthread主动调用 TaskGroup::usleep 切换到其他bthread上，这是切换后调用的函数
+ * @param void_args
+ */
 void TaskGroup::_add_sleep_event(void* void_args) {
     // Must copy SleepArgs. After calling TimerThread::schedule(), previous
     // thread may be stolen by a worker immediately and the on-stack SleepArgs
     // will be gone.
+    // 此处为什么要直接复制出来呢？因为当调用 TimerThread::schedule() 后
+    // 可能时间比较短，马上就调用了 ready_to_run_from_timer_thread，
+    // 这个函数会直接将选择一个TaskGroup将其运行，运行过程中堆栈就可能发生变化了
+    // 那为什么现在复制可以呢，因为他还在睡眠中。堆栈还在那
     SleepArgs e = *static_cast<SleepArgs*>(void_args);
     TaskGroup* g = e.group;
     
@@ -749,6 +829,7 @@ void TaskGroup::_add_sleep_event(void* void_args) {
 
     if (!sleep_id) {
         // fail to schedule timer, go back to previous thread.
+        // 如果没有睡眠成，则直接重新调度，为什么不放入 remote_rq ?
         g->ready_to_run(e.tid);
         return;
     }
@@ -757,6 +838,7 @@ void TaskGroup::_add_sleep_event(void* void_args) {
     const uint32_t given_ver = get_version(e.tid);
     {
         BAIDU_SCOPED_LOCK(e.meta->version_lock);
+        // given_ver == *e.meta->version_butex 这个的作用是？
         if (given_ver == *e.meta->version_butex && !e.meta->interrupted) {
             e.meta->current_sleep = sleep_id;
             return;
@@ -780,6 +862,7 @@ void TaskGroup::_add_sleep_event(void* void_args) {
 // To be consistent with sys_usleep, set errno and return -1 on error.
 int TaskGroup::usleep(TaskGroup** pg, uint64_t timeout_us) {
     if (0 == timeout_us) {
+        // 直接切换
         yield(pg);
         return 0;
     }
@@ -881,7 +964,14 @@ int TaskGroup::interrupt(bthread_t tid, TaskControl* c) {
     }
     return 0;
 }
-
+/**
+ * @brief: 一个bthread在自己的任务函数执行过程中想要挂起时，
+ * 调用TaskGroup::yield(TaskGroup** pg)，yield()内部会调用TaskGroup::sched(TaskGroup** pg)，
+ * sched()也是负责将pthread的执行流转入下一个bthread（普通bthread或调度bthread）的任务函数。
+ * 挂起的bthread在适当的时候会被其他bthread唤醒，
+ * 即某个bthread会负责将挂起的bthread的tid重新加入TaskGroup的任务队列。
+ * @param pg
+ */
 void TaskGroup::yield(TaskGroup** pg) {
     TaskGroup* g = *pg;
     ReadyToRunArgs args = { g->current_tid(), false };

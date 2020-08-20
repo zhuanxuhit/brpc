@@ -46,6 +46,7 @@ public:
     // Returns #workers woken up.
     int signal(int num_task) {
         _pending_signal.fetch_add((num_task << 1), butil::memory_order_release);
+        // 唤醒 num_task 个任务
         return futex_wake_private(&_pending_signal, num_task);
     }
 

@@ -460,4 +460,4 @@ configure_file(cmake/brpc.pc.in ${PROJECT_BINARY_DIR}/brpc.pc @ONLY)
 install(FILES ${PROJECT_BINARY_DIR}/brpc.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
 # exampla
-add_subdirectory(example/echo_c++)
+#add_subdirectory(example/echo_c++)

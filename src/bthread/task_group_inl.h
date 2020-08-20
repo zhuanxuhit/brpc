@@ -58,10 +58,15 @@ inline void TaskGroup::exchange(TaskGroup** pg, bthread_t next_tid) {
                     &args);
     TaskGroup::sched_to(pg, next_tid);
 }
-
+/**
+ * @brief: 确保bthread的私有栈空间已创建, context结构已分配
+ * @param pg
+ * @param next_tid
+ */
 inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
     TaskMeta* next_meta = address_meta(next_tid);
     if (next_meta->stack == NULL) {
+        // 表明是一个新建的bthread，task_runner 是真正的用户函数入口
         ContextualStack* stk = get_stack(next_meta->stack_type(), task_runner);
         if (stk) {
             next_meta->set_stack(stk);
@@ -70,6 +75,7 @@ inline void TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid) {
             // In latter case, attr is forced to be BTHREAD_STACKTYPE_PTHREAD.
             // This basically means that if we can't allocate stack, run
             // the task in pthread directly.
+            // 如果我们不能申请到内存，直接在pthread中运行，直接执行，不需要进行栈切换
             next_meta->attr.stack_type = BTHREAD_STACKTYPE_PTHREAD;
             next_meta->set_stack((*pg)->_main_stack);
         }
@@ -87,12 +93,14 @@ inline void TaskGroup::push_rq(bthread_t tid) {
         // * Insertions into other TaskGroups perform worse when all workers
         //   are busy at creating bthreads (proved by test_input_messenger in
         //   brpc)
+        // 当本地队列满的时候，直接唤醒pthread，执行任务
         flush_nosignal_tasks();
         LOG_EVERY_SECOND(ERROR) << "_rq is full, capacity=" << _rq.capacity();
         // TODO(gejun): May cause deadlock when all workers are spinning here.
         // A better solution is to pop and run existing bthreads, however which
         // make set_remained()-callbacks do context switches and need extensive
         // reviews on related code.
+        // 此处sleep可能会导致一直睡眠，因为不断有新bthread创建，导致一直添加不到队列中
         ::usleep(1000);
     }
 }

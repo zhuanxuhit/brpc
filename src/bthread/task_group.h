@@ -88,6 +88,8 @@ public:
     // The callback will be run in the beginning of next-run bthread.
     // Can't be called by current bthread directly because it often needs
     // the target to be suspended already.
+    // 在执行下一个任务之前调用的函数，比如迁移bthread执行完毕之后的清理工作
+    // 前一个bthread 切入到新的bthread之后，需要把前一个任务的btread_id push 到runqueue_等
     typedef void (*RemainedFn)(void*);
     void set_remained(RemainedFn cb, void* arg) {
         _last_context_remained = cb;
@@ -224,32 +226,52 @@ friend class TaskControl;
 #ifndef NDEBUG
     int _sched_recursive_guard;
 #endif
-
+    /*当前执行过程中的Bthread对应的TaskMeta*/
     TaskMeta* _cur_meta;
     
     // the control that this group belongs to
+    // 当前Pthread（TaskGroup）所属的TaskControl（线程池）
     TaskControl* _control;
+    // push任务到自身队列，未signal唤醒其他TaskGroup的次数
     int _num_nosignal;
+    // push任务到自身队列，signal其他TaskGroup的次数
     int _nsignaled;
     // last scheduling time
+    // 上一次调度执行的时间
     int64_t _last_run_ns;
+    // 总共累计的执行时间，不包含pthread main_tid 的运行之间
     int64_t _cumulated_cputime_ns;
-
+    // bthread之间的切换次数
     size_t _nswitch;
+    /*
+    * 在执行下一个任务(task)之前调用的函数，比如前一个bthread 切入到新的bthread之后
+    * 需要把前一个任务的btread_id push 到runqueue以备下次调用_等
+    */
     RemainedFn _last_context_remained;
     void* _last_context_remained_arg;
-
+    // 没有任务在的时候停在停车场等待唤醒
     ParkingLot* _pl;
 #ifndef BTHREAD_DONT_SAVE_PARKING_STATE
+    // 停车场的上一次状态，用户wakeup
     ParkingLot::State _last_pl_state;
 #endif
+    // 本TaskGroup（pthread） 从其他TaskGroup抢占任务的随机因子信息（work-steal）
     size_t _steal_seed;
     size_t _steal_offset;
-    ContextualStack* _main_stack;
-    bthread_t _main_tid;
-    WorkStealingQueue<bthread_t> _rq;
-    RemoteTaskQueue _remote_rq;
-    int _remote_num_nosignal;
+    // 一个pthread会在TaskGroup::run_main_task()中执行while()循环，
+    // 不断获取并执行bthread任务，一个pthread的执行流不是永远在bthread中，
+    // 比如等待任务时，pthread没有执行任何bthread，执行流就是直接在pthread上。
+    // 可以将pthread在“等待bthread-获取到bthread-进入bthread执行任务函数之前”这个过程也抽象成一个bthread，
+    // 称作一个pthread的“调度bthread”或者“主bthread”，它的tid和私有栈就是_main_tid和_main_stack。
+    ContextualStack* _main_stack; // 初始化执行该TaskGroup的Pthread的初始_main_stack,STACK_TYPE_MAIN
+    bthread_t _main_tid; // 在构造函数初始时，会初始化一个TaskMeta,对应的maiin thread 的pthread信息
+    // pthread 1在执行从自己私有的TaskGroup中取出的bthread 1时，
+    // 如果 bthread 1执行过程中又创建了新的bthread 2，
+    // 则 bthread 1将 bthread 2的tid压入pthread 1的TaskGroup的_rq队列中。
+    WorkStealingQueue<bthread_t> _rq; // 本taskGroup的runqueue_
+    // 如果一个pthread 1想让pthread 2执行bthread 1，则pthread 1会将bthread 1的tid压入pthread 2的TaskGroup的_remote_rq队列中。
+    RemoteTaskQueue _remote_rq; // 用于存放非TaskControl中线程创建的Bthread(比如)外围的Pthread直接调用bthread库接口创建的bthread
+    int _remote_num_nosignal; // push任务到remote队列，未signal唤醒其他TaskGroup的次数
     int _remote_nsignaled;
 };
 

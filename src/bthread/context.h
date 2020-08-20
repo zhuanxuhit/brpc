@@ -77,6 +77,14 @@ extern "C"{
 intptr_t BTHREAD_CONTEXT_CALL_CONVENTION
 bthread_jump_fcontext(bthread_fcontext_t * ofc, bthread_fcontext_t nfc,
                       intptr_t vp, bool preserve_fpu = false);
+// 在context.cpp中定义的汇编函数
+/**
+ * @brief:具体实现看 #if defined(BTHREAD_CONTEXT_PLATFORM_linux_x86_64) && defined(BTHREAD_CONTEXT_COMPILER_gcc)
+ * @param[in] sp:当前栈顶指针
+ * @param[in] size:栈大小
+ * @param[in] fn:入口函数
+ * @return
+ */
 bthread_fcontext_t BTHREAD_CONTEXT_CALL_CONVENTION
 bthread_make_fcontext(void* sp, size_t size, void (* fn)( intptr_t));
 
